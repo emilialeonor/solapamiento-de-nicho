@@ -1,0 +1,789 @@
+---
+title: "Invasiones Sudamérica: solapamiento de nicho entre Rapistrum rugosum  y Lepidium bonariense."
+author: "Emilia Araneda y Javiera Santibañez"
+format: html
+editor: visual
+---
+
+
+
+## Cálculo de solapamiento de nicho para *Lepidium bonariense* y *Rapistrum rugosum* en Sudamérica
+
+A continuación se presenta el código para calcular el solapamiento de nicho para una especie nativa y otra invasora en la misma zona geográfica.
+
+## Preparar el ambiente de trabajo
+
+limpiar las variables y cargar las siguientes librerías, si no están installadas ejecutar install.packages("nombre del paquete")
+
+
+
+```{r}
+#| label: setup
+#| include: false
+
+rm (list=ls())
+library(maxnet)
+library(pROC)
+library(geodata)
+library(rgbif)
+library(ecospat)
+library(geodata)
+library(ade4)
+library(sf)
+library(dplyr)
+library(factoextra)
+library(dismo)
+library(dplyr)
+library(terra)
+```
+
+
+
+## Cargar las ocurrencias
+
+En primer lugar, si no se tienen guardadas y limpiadas las ocurrencias comenzamos por cargarlas de GBIF:
+
+
+
+```{r}
+#| label: Descargar ocurrencias
+
+occL <- occ_search(scientificName = "Lepidium bonariense",
+                  limit = 1000, 
+                  hasCoordinate = TRUE,
+                  continent = "south_america",
+                  fields = c("species", "decimalLatitude", "decimalLongitude"))
+
+
+occR <- occ_search(scientificName = "Rapistrum rugosum",
+                   limit = 1000, 
+                   hasCoordinate = TRUE, 
+                   continent = "south_america",
+                   fields = c("species", "decimalLatitude", "decimalLongitude"))
+
+```
+
+
+
+Convertir las ocurrencias en un data frame y luego limpiar las ocurrencias para evitar incluir coordenadas que están, por ejemplo, en el mar o museos.
+
+
+
+```{r}
+#| label: Limpiar ocurrencias
+
+occL <- as.data.frame(occL$data)
+occR <- as.data.frame(occR$data)
+
+ocL_filtro<-CoordinateCleaner::clean_coordinates(occL, 
+                                                         lon = "decimalLongitude",
+                                                         lat = "decimalLatitude",
+                                                         species = "species",
+                                                         value = "clean",
+                                                         countries = NULL,
+                                                         tests = c("duplicates", 
+                                                                   "capitals", 
+                                                                   "centroids", 
+                                                                   "equal",
+                                                                   "institutions", 
+                                                                   "seas",
+                                                                   "zeros"))
+ocR_filtro<-CoordinateCleaner::clean_coordinates(occR, 
+                                                 lon = "decimalLongitude",
+                                                 lat = "decimalLatitude",
+                                                 species = "species",
+                                                 value = "clean",
+                                                 countries = NULL,
+                                                 tests = c("duplicates", 
+                                                           "capitals", 
+                                                           "centroids", 
+                                                           "equal",
+                                                           "institutions", 
+                                                           "seas",
+                                                           "zeros"))
+
+
+ocL_filtro <- ocL_filtro[, c("species",
+                              "decimalLongitude",
+                              "decimalLatitude")]  #Siempre se trabaja en el orden: longitud, latitud
+ocR_filtro <- ocR_filtro[, c("species",
+                             "decimalLongitude",
+                             "decimalLatitude")]
+
+```
+
+
+
+Para guardar las ocurrencias en nuestro computador:
+
+
+
+```{r}
+#| label: cargar-datos
+#| cache: false
+
+write.csv(ocL_filtro, "Lep.csv")
+write.csv(ocR_filtro, "Rap.csv")
+
+```
+
+
+
+Si es que ya se tenían previamente cargadas en archivos, se puede partir desde aquí. Poner atención al nombre del archivo y estar trabajando en el directorio donde los archvios están ubicados
+
+
+
+```{r}
+#| label: Opcional, partir de aquí si ya estaba guardado
+
+ocL_filtro <- read.csv("Lep.csv",sep = ";")
+ocR_filtro <- read.csv("Rap.csv",sep = ";")
+#Juntar ocurrencias
+oc <- bind_rows(
+  ocL_filtro, ocR_filtro
+)
+```
+
+
+
+## Manejo capas climáticas PRESENTE:
+
+Para tener las capas climáticas, descargamos desde <https://www.worldclim.org/data/worldclim21.html>, en la sección "bioclimatic variables", seleccionar 10min. **Atención,** en esta sección se utilizan los nombres de los archivos guardados en la carpeta, quizás después de su descarga se encuentren con otro nombre.
+
+```{# {r}
+#| label: Manejo de capas presente
+
+clima <- rast(c("bio01.tif","bio04.tif","bio10.tif","bio11.tif","bio12.tif","bio15.tif","bio18.tif","bio19.tif"))
+plot(clima)
+plot(clima$bio01)
+summary(clima[1])
+
+# Zoom a solo Sudamérica 
+e <- ext(-85,-35,-60,10)
+clima <- crop(clima,e)
+
+#Extraer valores climáticos para cada ocurrencia
+#| label: Extracción de valores
+oc <- bind_rows(
+  ocL_filtro, ocR_filtro
+)
+valores <- na.omit(cbind(oc, extract(clima, oc[c("decimalLongitude", "decimalLatitude")], ID = FALSE)))
+View(valores)
+
+#Ocurrencias con extract:
+
+bkg<-clima
+
+occs<- oc
+
+lsOccs <- vect(occs, geom = c("decimalLongitude",
+                              "decimalLatitude"),
+               crs = "+proj=longlat +datum=WGS84")
+
+lsOccsAll <- lsOccs 
+
+# Seleccionar un record por cell
+lsOccs <- spatSample(lsOccs, size = 1, strata = bkg)
+
+lsOccs <- lsOccs[complete.cases(data.frame(lsOccs)), ]
+
+SV<-na.omit(occs[occs$species=="Lepidium bonariense",])
+DC<-na.omit(occs[occs$species=="Rapistrum rugosum",])
+
+eckertIV <- "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+occ.sv <- sf::st_as_sf(SV, coords = c("decimalLongitude","decimalLatitude"), crs = raster::crs(bkg))
+occ.sv <- sf::st_transform(occ.sv, crs = eckertIV)
+sv.buf <- sf::st_buffer(occ.sv, dist = 500000) %>% 
+  sf::st_union() %>% 
+  sf::st_sf() %>%
+  sf::st_transform(crs = raster::crs(bkg))
+sv_buf <- terra::vect(sv.buf)
+
+occ.dc <- sf::st_as_sf(DC, coords = c("decimalLongitude","decimalLatitude"), crs = raster::crs(bkg))
+occ.dc <- sf::st_transform(occ.dc, crs = eckertIV)
+
+dc.buf <- sf::st_buffer(occ.dc, dist = 500000) %>% 
+  sf::st_union() %>% 
+  sf::st_sf() %>%
+  sf::st_transform(crs = raster::crs(bkg))
+dc_buf <- terra::vect(dc.buf)
+
+lsNA <- lsOccs[sv_buf]
+lsEA <- lsOccs[dc_buf]
+
+#Para cortar las capas climáticas
+
+naEnvR <- mask(bkg, sv_buf)
+naEnvR <- raster::stack(naEnvR)
+naEnvR.p<-dismo::randomPoints(naEnvR[[1]], 10000, tryf=55, warn=2, lonlatCorrection=TRUE)
+naEnvR<-cbind(naEnvR.p,extract(naEnvR,naEnvR.p))
+colnames(naEnvR)[1:2]<-c("decimalLongitude","decimalLatitude")
+naEnvR<-na.omit(naEnvR)
+naEnvR <- vect(as.data.frame(naEnvR), geom = c("decimalLongitude",
+                                               "decimalLatitude"),
+               crs = "+proj=longlat +datum=WGS84")
+naEnvM <- as.data.frame(naEnvR)
+
+eaEnvR <- mask(bkg, dc_buf)
+eaEnvR <- raster::stack(eaEnvR)
+eaEnvR.p<-dismo::randomPoints(eaEnvR[[1]], 10000, tryf=120, warn=2, lonlatCorrection=TRUE)
+eaEnvR<-cbind(eaEnvR.p,extract(eaEnvR,eaEnvR.p))
+colnames(eaEnvR)[1:2]<-c("decimalLongitude","decimalLatitude")
+eaEnvR<-na.omit(eaEnvR)
+eaEnvR <- vect(as.data.frame(eaEnvR), geom = c("decimalLongitude",
+                                               "decimalLatitude"),
+               crs = "+proj=longlat +datum=WGS84")
+eaEnvM <- as.data.frame(eaEnvR)
+
+globalEnvR <- rbind(naEnvR, eaEnvR)
+globalEnvM <- as.data.frame(globalEnvR)
+
+#Limpiar los valores NA y preparar el PCA
+naEnvM <- naEnvM[complete.cases(naEnvM), ]
+eaEnvM <- eaEnvM[complete.cases(eaEnvM), ]
+globalEnvM <- globalEnvM[complete.cases(globalEnvM), ]
+
+pca.clim <- dudi.pca(globalEnvM, center = TRUE,
+                     scale = TRUE, scannf = FALSE, nf = 2)
+
+global.scores <- pca.clim$li
+lsEA_clim <- extract(bkg, lsEA, ID = FALSE)
+lsNA_clim <- extract(bkg, lsNA, ID = FALSE)
+
+#Comenzar el PCA y uso de ECOSPAT, permite visualizar el niche overlap
+
+nativeLS.scores <- suprow(pca.clim, lsEA_clim)$li
+invasiveLS.scores <- suprow(pca.clim, lsNA_clim)$li
+
+nativeEnv.scores <- suprow(pca.clim, naEnvM)$li
+invasiveEnv.scores <- suprow(pca.clim, eaEnvM)$li
+
+nativeGrid <- ecospat.grid.clim.dyn(global.scores,
+                                    nativeEnv.scores,
+                                    nativeLS.scores)
+
+invasiveGrid <- ecospat.grid.clim.dyn(global.scores,
+                                      invasiveEnv.scores, 
+                                      invasiveLS.scores)
+
+ecospat.plot.niche.dyn(nativeGrid, invasiveGrid,
+                       quant = 0.05, interest = 2,
+                       name.axis1 = "PC1", name.axis2 = "PC2") 
+
+ecospat.shift.centroids(nativeEnv.scores,invasiveEnv.scores,
+                        naEnvM, eaEnvM)
+
+#Cálculo de D Schoenner e I de Hellinger
+Res <- as.data.frame(ecospat.niche.overlap (nativeGrid,
+                                            invasiveGrid, cor = T))
+Res
+
+#Tests 
+
+eq.test. <- ecospat.niche.equivalency.test(nativeGrid,
+                                           invasiveGrid,
+                                           rep=999,overlap.alternative = "lower")
+ecospat.plot.overlap.test(eq.test, "D", "Equivalency")
+
+eq.test.h <- ecospat.niche.equivalency.test(nativeGrid,
+                                            invasiveGrid,
+                                            rep=99,overlap.alternative = "higher")
+summary(eq.test.h)
+ecospat.plot.overlap.test(eq.test.h, "D", "Equivalency")
+
+#Graficar pca
+
+fviz_pca_var(pca.clim, col.var = "contrib", ggtheme = theme_classic())
+
+ecospat.plot.contrib(contrib=pca.clim$co, eigen=pca.clim$eig)
+pca.cal$co
+```
+
+## MaxEnt para *Lepidium bonariese*
+
+La siguiente sección nos permitirá preparar los datos para el cálculo de solapamiento en el futuro. Debemos partir por usar el modelo MAXENT. Este, nos permitirá generar las ocurrencias con una probabilidad mayor al 0.7 para evaluar el solapamiento al futuro
+
+Recomendamos, limpiar las variables anteriores y cargar las siguientes librerías:
+
+
+
+```{r}
+#| label: setup 2
+rm (list=ls())
+
+library(terra)
+library(dplyr)
+library(sf)
+library(maxnet)
+library(pROC)
+library(geodata)
+
+```
+
+
+
+Ahora, **cargamos los datos que guardamos en la seccion anterior,** atención, el nombre utilizado acá es el específico de la sección anterior, para cargarlo de manera correcta usar el nombre que ud. utilizó para cargarlo.
+
+Para el **manejo de capas climáticas**, considerar que por ejemplo: "bio01.tif" se refiere al nombre del archivo guardado desde Worldclim en su directorio de trabajo, asegurarse de tener ese nombre. Por otro lado "wc2.1_10m_bioc_HadGEM3-GC31-LL_ssp585_2061-2080.tif" fue descargado de <https://www.worldclim.org/data/cmip6/cmip6_clim10m.html>, seleccionando el ssp585
+
+
+
+```{r}
+#| label: Maxent, proyección para nativa
+
+datos <- read.csv("Lep.csv")
+occs <- data.frame(decimalLongitude = datos$decimalLongitude,
+                   decimalLatitude = datos$decimalLatitude)
+occsL_vect <- vect(datos, geom = c("decimalLongitude", "decimalLatitude"),
+                  crs = "EPSG:4326")
+#MANEJO DE CAPAS CLIMÁTICAS.
+#Presente: 
+climaPRE <- rast(c("bio01.tif","bio04.tif","bio10.tif","bio11.tif","bio12.tif","bio15.tif","bio18.tif","bio19.tif"))
+CapasRaster <- climaPRE
+#Futuro
+climaFUT <- rast("wc2.1_10m_bioc_HadGEM3-GC31-LL_ssp585_2061-2080.tif")
+climaFUT <- climaFUT[[c(1,4,10,11,12,15,18,19)]] #Selección por oden, es decir, estamos seleccionando aquellas que están en el primer, cuarto lugar, por ejemplo, esas son las capas que seleccionamos también para el presente.
+plot(climaFUT)
+
+#Para enfocarnos en sudamérica y los puntos de fondo:
+e <- ext(-85,-35,-60,10)
+PRESENTE <- crop(CapasRaster,e)
+plot(PRESENTE)
+
+#Lo mismo pero futuro
+e <- ext(-85,-35,-60,10)
+FUTURO <- crop(climaFUT,e)
+plot(FUTURO)
+
+# Extraer valores climáticos en cada puntos de ocurrencia
+pres_vals <- terra::extract(climaFUT, occsL_vect, ID = FALSE)
+pres_vals <- na.omit(pres_vals)
+pres_vals <- unique(pres_vals)
+pres_vals$pa <- 1
+
+# Puntos de fondo 
+set.seed(21)
+bkg <- spatSample(climaFUT, size = 1000,
+                  method = "random",
+                  na.rm = TRUE, 
+                  as.points = TRUE)
+
+back_vals <- terra::extract(climaFUT, bkg, ID = FALSE)
+back_vals$pa <- 0
+
+#En esta sección dividimos los datos para entrenar y probar el modelo. El 75% de los puntos aleatorios serán usados para entrenar el modelo, 25% restante serán para evaluar el poder predictivo del modelo
+set.seed(42)
+train_idx <- sample(1:nrow(pres_vals), size = 0.75 * nrow(pres_vals)) 
+train_pres <- pres_vals[train_idx, ]
+test_pres <- pres_vals[-train_idx, ]
+train_data <- rbind(train_pres, back_vals)
+test_data <- rbind(test_pres, back_vals)
+
+x_train <- train_data[, !names(train_data) %in% "pa"]
+y_train <- train_data$pa
+x_test <- test_data[, !names(test_data) %in% "pa"]
+y_test <- test_data$pa
+
+# Modelo 
+mx_model <- maxnet(y_train, x_train, f = maxnet.formula(y_train, x_train, classes = "lqph"))
+
+train_pred <- predict(mx_model, x_train, type = "cloglog")
+test_pred <- predict(mx_model, x_test, type = "cloglog")
+auc_train <- roc(y_train, train_pred)$auc
+auc_test <- roc(y_test, test_pred)$auc
+print(paste("AUC Train:", auc_train))
+print(paste("AUC Test:", auc_test))
+
+# Predicción y proyección
+pred_PRE <- terra::predict(PRESENTE, mx_model, type = "cloglog", na.rm = TRUE)
+pred_FUT <- terra::predict(FUTURO, mx_model, type = "cloglog", na.rm = TRUE)
+par(mfrow = c(1, 2))  
+plot(pred_PRE)
+plot(pred_FUT)
+
+# Curvas ROC, plot opcional (comprobado que corre en R)
+roc_train <- roc(y_train, train_pred)
+roc_test <- roc(y_test, test_pred)
+
+#par(mfrow = c(1, 1))  
+#plot(roc_train, col = "blue", legacy.axes = TRUE, main = "Curvas ROC")
+#plot(roc_test, col = "red", add = TRUE)
+
+#legend("bottomright", legend = c(
+  #paste("Train AUC =", round(auc_train, 3)),
+  #paste("Test AUC =", round(auc_test, 3))
+#), col = c("blue", "red"), lwd = 2)
+
+
+#Curvas de respuesta
+plot_list <- list()
+for (var in names(CapasRaster)) {
+  var_range <- seq(min(x_train[[var]], na.rm = TRUE), 
+                   max(x_train[[var]], na.rm = TRUE), 
+                   length.out = 100)
+  pred_data <- as.data.frame(lapply(x_train, mean, na.rm = TRUE))
+  pred_data <- pred_data[rep(1, 100), ]
+  pred_data[[var]] <- var_range
+  predictions <- predict(mx_model, pred_data, type = "cloglog")
+  
+  plot_df <- data.frame(x = var_range, y = predictions)
+  p <- ggplot(plot_df, aes(x = x, y = y)) +
+    geom_line(color = "blue", linewidth = 1.2) +
+    labs(x = var, 
+         y = "Probabilidad de ocurrencia",
+         title = paste("Curva de respuesta:", var)) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, size = 12),
+          axis.title = element_text(size = 10))
+  plot_list[[var]] <- p
+}
+
+#Esta sección es importante, desde aquí tendremos nuestras ocurrencias en el futuro, con la probabilidad de encontrar a la especie superior al 0.7
+
+# Crear una máscara para valores > 0.7
+futL <- pred_FUT > 0.7
+
+futL <- mask(pred_FUT, futL, maskvalues = FALSE)
+
+plot(futL)
+library(dismo)
+ofutL<-dismo::randomPoints(raster::raster(futL), 100, tryf=55, warn=2, lonlatCorrection=TRUE)
+
+#write.csv write.csv(ofutR, "occFuturoLep.csv")
+
+plot(FUTURO[[1]])
+points(ofutL, col="pink")
+```
+
+
+
+## MaxEnt para *Rapistrum rugosum*
+
+Aquí el proceso es el mismo que el anterior, para ahorro de espacio, se dejará toda la sección en un bloque, pues ya fue explicado. Sin embargo, si se tienen dudas de la metodología se puede referir al apartado Maxent para *Lepidium bonariense*. **IMPORTANTE:** considerar que los nombres de las variables son iguales, así que es improtante guardar antes de cambiar de especie y también cargar el archivo apropiado para la siguiente.
+
+
+
+```{r}
+#| label: setup 3
+rm (list=ls())
+library(terra)
+library(dplyr)
+library(sf)
+library(maxnet)
+library(pROC)
+library(geodata)
+```
+
+```{r}
+#| label: Maxent para exótica
+# Importar datos de ocurrencias
+
+datos <- read.csv("Rap.csv")
+
+occs <- data.frame(decimalLongitude = datos$decimalLongitude,
+                   decimalLatitude = datos$decimalLatitude)
+occsR_vect <- vect(datos, geom = c("decimalLongitude", "decimalLatitude"),
+                   crs = "EPSG:4326")
+
+#CAPAS CLIMATICAS
+climaPRE <- rast(c("bio01.tif","bio04.tif","bio10.tif","bio11.tif","bio12.tif","bio15.tif","bio18.tif","bio19.tif"))
+CapasRaster <- climaPRE
+climaFUT <- rast("wc2.1_10m_bioc_HadGEM3-GC31-LL_ssp585_2061-2080.tif")
+climaFUT <- climaFUT[[c(1,4,10,11,12,15,18,19)]]
+# Zoom a solo Sudamérica y Australia 
+e <- ext(-85,-35,-60,10)
+PRE <- crop(CapasRaster,e)
+plot(PRE)
+e <- ext(-85,-35,-60,10)
+FUT <- crop(climaFUT,e)
+plot(FUT)
+
+# Extraer valores climáticos en cada puntos de ocurrencia
+pres_vals <- terra::extract(CapasRaster, occsR_vect, ID = FALSE)
+pres_vals <- na.omit(pres_vals)
+pres_vals <- unique(pres_vals)
+pres_vals$pa <- 1
+
+# Puntos de fondo 
+set.seed(21)
+bkg <- spatSample(CapasRaster, size = 1000,
+                  method = "random",
+                  na.rm = TRUE, 
+                  as.points = TRUE)
+
+back_vals <- terra::extract(CapasRaster, bkg, ID = FALSE)
+back_vals$pa <- 0
+
+# Dividir datos para entrenar y probar el modelo
+# El 75% de los puntos aleatorios serán usados para entrenar el modelo
+# 25% restante serán para evaluar el poder predictivo del modelo
+
+set.seed(42)
+train_idx <- sample(1:nrow(pres_vals), size = 0.75 * nrow(pres_vals)) 
+train_pres <- pres_vals[train_idx, ]
+test_pres <- pres_vals[-train_idx, ]
+train_data <- rbind(train_pres, back_vals)
+test_data <- rbind(test_pres, back_vals)
+
+x_train <- train_data[, !names(train_data) %in% "pa"]
+y_train <- train_data$pa
+x_test <- test_data[, !names(test_data) %in% "pa"]
+y_test <- test_data$pa
+
+# Modelo 
+mx_model <- maxnet(y_train, x_train, f = maxnet.formula(y_train, x_train, classes = "lqph"))
+
+train_pred <- predict(mx_model, x_train, type = "cloglog")
+test_pred <- predict(mx_model, x_test, type = "cloglog")
+auc_train <- roc(y_train, train_pred)$auc
+auc_test <- roc(y_test, test_pred)$auc
+print(paste("AUC Train:", auc_train))
+print(paste("AUC Test:", auc_test))
+
+# Predicción y proyección
+pred_PRE <- terra::predict(PRE, mx_model, type = "cloglog", na.rm = TRUE)
+pred_FUT <- terra::predict(FUT, mx_model, type = "cloglog", na.rm = TRUE)
+ 
+par(mfrow = c(1, 2))
+plot(pred_PRE)
+plot(pred_FUT)
+
+# Curvas ROC, nuevamente, plot opcional
+roc_train <- roc(y_train, train_pred)
+roc_test <- roc(y_test, test_pred)
+
+#par(mfrow = c(1, 1))  
+#plot(roc_train, col = "blue", legacy.axes = TRUE, main = "Curvas ROC")
+#plot(roc_test, col = "red", add = TRUE)
+
+#legend("bottomright", legend = c(
+ # paste("Train AUC =", round(auc_train, 3)),
+  #paste("Test AUC =", round(auc_test, 3))
+#), col = c("blue", "red"), lwd = 2)
+
+
+#Curvas de respuesta
+plot_list <- list()
+for (var in names(CapasRaster)) {
+  var_range <- seq(min(x_train[[var]], na.rm = TRUE), 
+                   max(x_train[[var]], na.rm = TRUE), 
+                   length.out = 100)
+  pred_data <- as.data.frame(lapply(x_train, mean, na.rm = TRUE))
+  pred_data <- pred_data[rep(1, 100), ]
+  pred_data[[var]] <- var_range
+  predictions <- predict(mx_model, pred_data, type = "cloglog")
+  
+  plot_df <- data.frame(x = var_range, y = predictions)
+  p <- ggplot(plot_df, aes(x = x, y = y)) +
+    geom_line(color = "blue", linewidth = 1.2) +
+    labs(x = var, 
+         y = "Probabilidad de ocurrencia",
+         title = paste("Curva de respuesta:", var)) +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5, size = 12),
+          axis.title = element_text(size = 10))
+  plot_list[[var]] <- p
+}
+
+# Crear una máscara para valores > 0.7
+futR <- pred_FUT > 0.7
+
+futR <- mask(pred_FUT, futR, maskvalues = FALSE)
+
+plot(futR)
+library(dismo)
+ofutR<-dismo::randomPoints(raster::raster(futR), 100, tryf=55, warn=2, lonlatCorrection=TRUE)
+#write.csv(ofutR, "occFuturoR.csv") importante guardar estos datos para la parte de nicho futuro
+
+plot(FUT[[1]])
+points(ofutR, col="purple")
+
+```
+
+
+
+## Cálculo solapamiento de nicho en futuro
+
+El procedimiento es similar para la primera parte, usando PCA y Ecospat, pero, utilizaremos las ocurrencias guardadas en el paso anterior, es decir "occFuturoR.csv" y "occFuturoLep.csv"
+
+
+
+```{r}
+#| label: Solapamiento nicho futuro
+# 
+#Cargar archivos guardados de futuro, producidos en la sección de MaxENT
+
+library(ecospat)
+library(terra)
+library(rgbif)
+library(geodata)
+library(ade4)
+library(sf)
+library(dplyr)
+library(factoextra)
+library(dismo)
+
+
+ocL_filtro <- read.csv("occFuturoLep.csv", sep = ";")
+ocR_filtro <- read.csv("occFuturoR.csv", sep= ";")
+
+library(dplyr)
+oc <- bind_rows(
+  ocL_filtro, ocR_filtro
+)
+#manejo de capas climáticas
+library(terra)
+climaFUT <- rast("wc2.1_10m_bioc_HadGEM3-GC31-LL_ssp585_2061-2080.tif")
+clima <- climaFUT
+plot(clima)
+plot(clima$bio01)
+summary(clima[1])
+
+# Zoom a solo Sudamérica 
+e <- ext(-85,-35,-60,10)
+clima <- crop(clima,e)
+plot(clima$bio01)
+
+valores <- na.omit(cbind(oc, extract(clima, oc[2:3], ID = FALSE)))#con esto extraemos todos los valores climaticos para cada ocurrencia
+View(valores)
+
+#rasters
+
+bkg<-clima
+
+#ocurrencias con extract
+
+occs<- oc
+
+  
+
+lsOccs <- vect(occs, geom = c("lon", "lat"), crs = "+proj=longlat +datum=WGS84")
+
+lsOccsAll <- lsOccs ## keep this for later
+
+## select one record per cell:
+lsOccs <- spatSample(lsOccs, size = 1, strata = bkg)
+
+lsOccs <- lsOccs[complete.cases(data.frame(lsOccs)), ]
+
+SV<-na.omit(occs[occs$species=="Lepidium bonariense",])
+DC<-na.omit(occs[occs$species=="Rapistrum rugosum",])
+
+eckertIV <- "+proj=eck4 +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs"
+occ.sv <- sf::st_as_sf(SV, coords = c("lon","lat"), crs = raster::crs(bkg))
+occ.sv <- sf::st_transform(occ.sv, crs = eckertIV)
+sv.buf <- sf::st_buffer(occ.sv, dist = 500000) %>% 
+  sf::st_union() %>% 
+  sf::st_sf() %>%
+  sf::st_transform(crs = raster::crs(bkg))
+sv_buf <- terra::vect(sv.buf)
+
+occ.dc <- sf::st_as_sf(DC, coords = c("lon","lat"), crs = raster::crs(bkg))
+occ.dc <- sf::st_transform(occ.dc, crs = eckertIV)
+
+dc.buf <- sf::st_buffer(occ.dc, dist = 500000) %>% 
+  sf::st_union() %>% 
+  sf::st_sf() %>%
+  sf::st_transform(crs = raster::crs(bkg))
+dc_buf <- terra::vect(dc.buf)
+
+lsNA <- lsOccs[sv_buf]
+lsEA <- lsOccs[dc_buf]
+
+## Crop Climate Layers:
+naEnvR <- mask(bkg, sv_buf)
+naEnvR <- raster::stack(naEnvR)
+naEnvR.p <- dismo::randomPoints(raster::raster(naEnvR[[1]]), 10000, tryf=55, warn=2, lonlatCorrection=TRUE)
+naEnvR<-cbind(naEnvR.p,extract(naEnvR,naEnvR.p))
+colnames(naEnvR)[1:2]<-c("lon","lat")
+naEnvR<-na.omit(naEnvR)
+naEnvR <- vect(as.data.frame(naEnvR), geom = c("lon",
+                                               "lat"),
+               crs = "+proj=longlat +datum=WGS84")
+naEnvM <- as.data.frame(naEnvR)
+
+## Crop Climate Layers:
+eaEnvR <- mask(bkg, dc_buf)
+eaEnvR <- raster::stack(eaEnvR)
+eaEnvR.p <- dismo::randomPoints(raster::raster(eaEnvR[[1]]), 10000, tryf=120, warn=2, lonlatCorrection=TRUE)
+eaEnvR<-cbind(eaEnvR.p,extract(eaEnvR,eaEnvR.p))
+colnames(eaEnvR)[1:2]<-c("lon","lat")
+eaEnvR<-na.omit(eaEnvR)
+eaEnvR <- vect(as.data.frame(eaEnvR), geom = c("lon",
+                                               "lat"),
+               crs = "+proj=longlat +datum=WGS84")
+eaEnvM <- as.data.frame(eaEnvR)
+
+globalEnvR <- rbind(naEnvR, eaEnvR)
+globalEnvM <- as.data.frame(globalEnvR)
+
+## Clean out missing values:
+naEnvM <- naEnvM[complete.cases(naEnvM), ]
+eaEnvM <- eaEnvM[complete.cases(eaEnvM), ]
+globalEnvM <- globalEnvM[complete.cases(globalEnvM), ]
+
+pca.clim <- dudi.pca(globalEnvM, center = TRUE,
+                     scale = TRUE, scannf = FALSE, nf = 2)
+
+global.scores <- pca.clim$li
+# Extraer valores climáticos para lsEA y lsNA
+lsEA_clim <- extract(bkg, lsEA, ID = FALSE)
+lsNA_clim <- extract(bkg, lsNA, ID = FALSE)
+
+lsEA_clim <- as.data.frame(lsEA_clim)
+lsNA_clim <- as.data.frame(lsNA_clim)
+
+# Seleccionar solo las columnas que existen en globalEnvM
+columnas_comunes <- names(globalEnvM)
+lsEA_clim <- lsEA_clim[, columnas_comunes, drop = FALSE]
+lsNA_clim <- lsNA_clim[, columnas_comunes, drop = FALSE]
+
+# Eliminar filas con NA
+lsEA_clim <- na.omit(lsEA_clim)
+lsNA_clim <- na.omit(lsNA_clim)
+
+# Ahora sí puedes hacer el PCA
+nativeLS.scores <- suprow(pca.clim, lsEA_clim)$li
+invasiveLS.scores <- suprow(pca.clim, lsNA_clim)$li
+
+nativeEnv.scores <- suprow(pca.clim, naEnvM)$li
+invasiveEnv.scores <- suprow(pca.clim, eaEnvM)$li
+
+nativeGrid <- ecospat.grid.clim.dyn(global.scores,
+                                    nativeEnv.scores,
+                                    nativeLS.scores)
+
+invasiveGrid <- ecospat.grid.clim.dyn(global.scores,
+                                      invasiveEnv.scores, 
+                                      invasiveLS.scores)
+
+ecospat.plot.niche.dyn(nativeGrid, invasiveGrid,
+                       quant = 0.05, interest = 2,
+                       name.axis1 = "PC1", name.axis2 = "PC2") 
+
+ecospat.shift.centroids(nativeEnv.scores,invasiveEnv.scores,
+                        naEnvM, eaEnvM)
+
+Res <- as.data.frame(ecospat.niche.overlap (nativeGrid,
+                                            invasiveGrid, cor = T))
+Res
+
+#Test opcionales:
+#eq.test. <- ecospat.niche.equivalency.test(nativeGrid,                                           invasiveGrid,  rep=999,overlap.alternative = "lower") 
+#ecospat.plot.overlap.test(eq.test, "D", "Equivalency")
+
+#eq.test.h <- ecospat.niche.equivalency.test(nativeGrid,invasiveGrid, rep=99,overlap.alternative = "higher")
+#summary(eq.test.h)
+#ecospat.plot.overlap.test(eq.test.h, "D", "Equivalency")
+
+fviz_pca_var(pca.clim, col.var = "contrib", ggtheme = theme_classic())
+
+ecospat.plot.contrib(contrib=pca.clim$co, eigen=pca.clim$eig)
+#pca.cal$co si se quiere graficar pca
+
+```
+
+
+
+## FIN
+
